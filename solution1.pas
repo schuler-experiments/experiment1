@@ -9,9 +9,18 @@ uses
 type
   tstringdynarray = array of string;
   tqworddynarray = array of qword;
+  tdoubledynarray = array of double;
 
   ttaskpriority = (tplow, tpmedium, tphigh, tpcritical);
   ttaskstatus = (tspending, tsinprogress, tscompleted, tsblocked);
+
+  ttaskhistoryentry = record
+    status: ttaskstatus;
+    changedat: tdatetime;
+    note: string;
+  end;
+
+  ttaskhistoryentrydynarray = array of ttaskhistoryentry;
 
   ttask = record
     id: qword;
@@ -28,6 +37,7 @@ type
     estimatedhours: double;
     actualhours: double;
     recurrenceintervaldays: integer;
+    history: ttaskhistoryentrydynarray;
   end;
 
   ttaskdynarray = array of ttask;
@@ -63,6 +73,8 @@ type
     function tagexists(const atags: tstringdynarray; const atag: string): boolean;
     function istaskcompleted(const aid: qword): boolean;
     procedure cleardependencyreferences(const aid: qword);
+    procedure addhistoryentry(const aindex: integer; const astatus: ttaskstatus; const anote: string);
+    function getpriorityweight(const apriority: ttaskpriority): integer;
   public
     constructor create;
     function addtask(const atitle, adescription: string; const apriority: ttaskpriority; const aduedate: tdatetime): ttask;
@@ -88,7 +100,47 @@ type
     function gettasksduesoon(const areference: tdatetime; const adaywindow: integer): ttaskdynarray;
     function gettasksreadytostart: ttaskdynarray;
     function getprogresssnapshot(const areference: tdatetime): ttaskprogress;
+    function getfeaturelist: tstringdynarray;
+    function getstatushistory(const aid: qword): ttaskhistoryentrydynarray;
+    function getstatushistorystrings(const aid: qword): tstringdynarray;
+    function rescheduleoverduetasks(const areference: tdatetime; const adayextension: integer): tqworddynarray;
+    function gettaskswithoutdependencies: ttaskdynarray;
+    function getpriorityworkload: tdoubledynarray;
+    function gettopprioritizedtasks(const acount: integer): ttaskdynarray;
+    function forecastworkload(const areference: tdatetime; const adaywindow: integer): double;
   end;
+
+function statustodescription(const astatus: ttaskstatus): string;
+begin
+  case astatus of
+    tspending:
+      result := 'pending';
+    tsinprogress:
+      result := 'in progress';
+    tscompleted:
+      result := 'completed';
+    tsblocked:
+      result := 'blocked';
+  else
+    result := 'unknown';
+  end;
+end;
+
+function prioritydescription(const apriority: ttaskpriority): string;
+begin
+  case apriority of
+    tplow:
+      result := 'low';
+    tpmedium:
+      result := 'medium';
+    tphigh:
+      result := 'high';
+    tpcritical:
+      result := 'critical';
+  else
+    result := 'low';
+  end;
+end;
 
 function ttaskmanager.findindexbyid(const aid: qword): integer;
 var
@@ -215,6 +267,39 @@ begin
     end;
 end;
 
+procedure ttaskmanager.addhistoryentry(const aindex: integer; const astatus: ttaskstatus; const anote: string);
+var
+  len: integer;
+  entrytime: tdatetime;
+begin
+  if (aindex < 0) or (aindex >= length(ftasks)) then
+    begin
+      exit;
+    end;
+  entrytime := now;
+  len := length(ftasks[aindex].history);
+  setlength(ftasks[aindex].history, len + 1);
+  ftasks[aindex].history[len].status := astatus;
+  ftasks[aindex].history[len].changedat := entrytime;
+  ftasks[aindex].history[len].note := anote;
+end;
+
+function ttaskmanager.getpriorityweight(const apriority: ttaskpriority): integer;
+begin
+  case apriority of
+    tplow:
+      result := 1;
+    tpmedium:
+      result := 2;
+    tphigh:
+      result := 3;
+    tpcritical:
+      result := 4;
+  else
+    result := 1;
+  end;
+end;
+
 constructor ttaskmanager.create;
 begin
   inherited create;
@@ -242,6 +327,10 @@ begin
   newtask.estimatedhours := 0.0;
   newtask.actualhours := 0.0;
   newtask.recurrenceintervaldays := 0;
+  setlength(newtask.history, 1);
+  newtask.history[0].status := tspending;
+  newtask.history[0].changedat := newtask.createdat;
+  newtask.history[0].note := 'task created';
   len := length(ftasks);
   setlength(ftasks, len + 1);
   ftasks[len] := newtask;
@@ -251,18 +340,33 @@ end;
 function ttaskmanager.updatestatus(const aid: qword; const astatus: ttaskstatus): boolean;
 var
   idx: integer;
+  statuschanged: boolean;
+  notedescription: string;
 begin
   idx := findindexbyid(aid);
   if idx <> -1 then
     begin
-      ftasks[idx].status := astatus;
-      if astatus = tscompleted then
+      statuschanged := ftasks[idx].status <> astatus;
+      if statuschanged then
         begin
-          ftasks[idx].completedat := now;
+          ftasks[idx].status := astatus;
+          if astatus = tscompleted then
+            begin
+              ftasks[idx].completedat := now;
+            end
+          else
+            begin
+              ftasks[idx].completedat := 0;
+            end;
+          notedescription := 'status changed to ' + statustodescription(astatus);
+          addhistoryentry(idx, astatus, notedescription);
         end
       else
         begin
-          ftasks[idx].completedat := 0;
+          if (astatus = tscompleted) and (ftasks[idx].completedat = 0) then
+            begin
+              ftasks[idx].completedat := now;
+            end;
         end;
       setupdatedat(idx);
       exit(true);
@@ -794,6 +898,241 @@ begin
     end;
 end;
 
+function ttaskmanager.getfeaturelist: tstringdynarray;
+begin
+  result := nil;
+  setlength(result, 7);
+  result[0] := 'dynamic task catalog with tagging and dependencies';
+  result[1] := 'status history tracking with audit notes';
+  result[2] := 'recurring task generation support';
+  result[3] := 'time tracking with estimated versus actual hours';
+  result[4] := 'readiness detection for dependency-free tasks';
+  result[5] := 'automated overdue rescheduling recommendations';
+  result[6] := 'priority-aware workload analytics and forecasting';
+end;
+
+function ttaskmanager.getstatushistory(const aid: qword): ttaskhistoryentrydynarray;
+var
+  idx: integer;
+  len: integer;
+  i: integer;
+begin
+  result := nil;
+  setlength(result, 0);
+  idx := findindexbyid(aid);
+  if idx <> -1 then
+    begin
+      len := length(ftasks[idx].history);
+      setlength(result, len);
+      for i := 0 to len - 1 do
+        begin
+          result[i] := ftasks[idx].history[i];
+        end;
+    end
+  else
+    begin
+      setlength(result, 0);
+    end;
+end;
+
+function ttaskmanager.getstatushistorystrings(const aid: qword): tstringdynarray;
+var
+  history: ttaskhistoryentrydynarray;
+  len: integer;
+  i: integer;
+  builder: string;
+begin
+  result := nil;
+  setlength(result, 0);
+  history := getstatushistory(aid);
+  len := length(history);
+  setlength(result, len);
+  for i := 0 to len - 1 do
+    begin
+      builder := formatdatetime('yyyy-mm-dd hh:nn', history[i].changedat) + ' - ' +
+        statustodescription(history[i].status);
+      if length(history[i].note) > 0 then
+        begin
+          builder := builder + ' (' + history[i].note + ')';
+        end;
+      result[i] := builder;
+    end;
+end;
+
+function ttaskmanager.rescheduleoverduetasks(const areference: tdatetime; const adayextension: integer): tqworddynarray;
+var
+  i: integer;
+  len: integer;
+  count: integer;
+  extensiondays: integer;
+  newdue: tdatetime;
+  note: string;
+begin
+  result := nil;
+  len := length(ftasks);
+  count := 0;
+  setlength(result, 0);
+  extensiondays := adayextension;
+  if extensiondays < 0 then
+    begin
+      extensiondays := 0;
+    end;
+  for i := 0 to len - 1 do
+    begin
+      if (ftasks[i].status <> tscompleted) and (ftasks[i].duedate < areference) then
+        begin
+          if extensiondays > 0 then
+            begin
+              newdue := incday(areference, extensiondays);
+            end
+          else
+            begin
+              newdue := areference;
+            end;
+          ftasks[i].duedate := newdue;
+          note := 'due date rescheduled to ' + datetostr(newdue);
+          addhistoryentry(i, ftasks[i].status, note);
+          setupdatedat(i);
+          setlength(result, count + 1);
+          result[count] := ftasks[i].id;
+          inc(count);
+        end;
+    end;
+end;
+
+function ttaskmanager.gettaskswithoutdependencies: ttaskdynarray;
+var
+  i: integer;
+  len: integer;
+  count: integer;
+begin
+  result := nil;
+  len := length(ftasks);
+  setlength(result, 0);
+  count := 0;
+  for i := 0 to len - 1 do
+    begin
+      if length(ftasks[i].dependencies) = 0 then
+        begin
+          setlength(result, count + 1);
+          result[count] := ftasks[i];
+          inc(count);
+        end;
+    end;
+end;
+
+function ttaskmanager.getpriorityworkload: tdoubledynarray;
+var
+  i: integer;
+  len: integer;
+  idx: integer;
+begin
+  result := nil;
+  setlength(result, 4);
+  for i := 0 to 3 do
+    begin
+      result[i] := 0.0;
+    end;
+  len := length(ftasks);
+  for i := 0 to len - 1 do
+    begin
+      idx := ord(ftasks[i].priority);
+      if (idx >= 0) and (idx < length(result)) then
+        begin
+          result[idx] := result[idx] + ftasks[i].estimatedhours;
+        end;
+    end;
+end;
+
+function ttaskmanager.gettopprioritizedtasks(const acount: integer): ttaskdynarray;
+var
+  work: ttaskdynarray;
+  len: integer;
+  i: integer;
+  j: integer;
+  bestindex: integer;
+  temp: ttask;
+  desired: integer;
+  bestweight: integer;
+  currentweight: integer;
+begin
+  result := nil;
+  setlength(result, 0);
+  work := getalltasks;
+  len := length(work);
+  if len > 1 then
+    begin
+      for i := 0 to len - 2 do
+        begin
+          bestindex := i;
+          for j := i + 1 to len - 1 do
+            begin
+              bestweight := getpriorityweight(work[bestindex].priority);
+              currentweight := getpriorityweight(work[j].priority);
+              if currentweight > bestweight then
+                begin
+                  bestindex := j;
+                end
+              else if currentweight = bestweight then
+                begin
+                  if work[j].duedate < work[bestindex].duedate then
+                    begin
+                      bestindex := j;
+                    end
+                  else if (work[j].duedate = work[bestindex].duedate) and (work[j].createdat < work[bestindex].createdat) then
+                    begin
+                      bestindex := j;
+                    end;
+                end;
+            end;
+          if bestindex <> i then
+            begin
+              temp := work[i];
+              work[i] := work[bestindex];
+              work[bestindex] := temp;
+            end;
+        end;
+    end;
+  desired := acount;
+  if desired < 0 then
+    begin
+      desired := 0;
+    end;
+  if desired > len then
+    begin
+      desired := len;
+    end;
+  setlength(result, desired);
+  for i := 0 to desired - 1 do
+    begin
+      result[i] := work[i];
+    end;
+end;
+
+function ttaskmanager.forecastworkload(const areference: tdatetime; const adaywindow: integer): double;
+var
+  len: integer;
+  i: integer;
+  windowdays: integer;
+  cutoffdate: tdatetime;
+begin
+  result := 0.0;
+  len := length(ftasks);
+  windowdays := adaywindow;
+  if windowdays < 0 then
+    begin
+      windowdays := 0;
+    end;
+  cutoffdate := incday(areference, windowdays);
+  for i := 0 to len - 1 do
+    begin
+      if (ftasks[i].status <> tscompleted) and (ftasks[i].duedate <= cutoffdate) then
+        begin
+          result := result + ftasks[i].estimatedhours;
+        end;
+    end;
+end;
+
 procedure printtasks(const alabel: string; const atasks: ttaskdynarray);
 var
   i: integer;
@@ -867,6 +1206,69 @@ begin
     end;
 end;
 
+procedure printstrings(const alabel: string; const items: tstringdynarray);
+var
+  i: integer;
+  len: integer;
+begin
+  writeln('--- ', alabel, ' ---');
+  len := length(items);
+  if len = 0 then
+    begin
+      writeln('no items');
+      exit;
+    end;
+  for i := 0 to len - 1 do
+    begin
+      writeln(items[i]);
+    end;
+end;
+
+procedure printqwordarray(const alabel: string; const items: tqworddynarray);
+var
+  i: integer;
+  len: integer;
+begin
+  writeln('--- ', alabel, ' ---');
+  len := length(items);
+  if len = 0 then
+    begin
+      writeln('no items');
+      exit;
+    end;
+  for i := 0 to len - 1 do
+    begin
+      writeln(items[i]);
+    end;
+end;
+
+procedure printworkload(const alabel: string; const values: tdoubledynarray);
+var
+  i: integer;
+  len: integer;
+  labeltext: string;
+begin
+  writeln('--- ', alabel, ' ---');
+  len := length(values);
+  if len = 0 then
+    begin
+      writeln('no workload data');
+      exit;
+    end;
+  for i := 0 to len - 1 do
+    begin
+      if (i >= ord(low(ttaskpriority))) and (i <= ord(high(ttaskpriority))) then
+        begin
+          labeltext := prioritydescription(ttaskpriority(i));
+        end
+      else
+        begin
+          labeltext := 'unknown';
+        end;
+      writeln(labeltext, ': ', formatfloat('0.00', values[i]));
+    end;
+end;
+
 procedure self_test;
 var
   manager: ttaskmanager;
@@ -887,11 +1289,21 @@ var
   implementationtags: tstringdynarray;
   documentationtags: tstringdynarray;
   dependencies: tqworddynarray;
+  features: tstringdynarray;
+  historystrings: tstringdynarray;
+  rescheduled: tqworddynarray;
+  workload: tdoubledynarray;
+  topfocus: ttaskdynarray;
+  dependencyfree: ttaskdynarray;
+  forecast: double;
   i: integer;
   len: integer;
 begin
   manager := ttaskmanager.create;
   try
+    features := manager.getfeaturelist;
+    printstrings('feature catalog', features);
+
     task1 := manager.addtask('design module', 'design task manager module', tphigh, encodedate(2024, 4, 15));
     task2 := manager.addtask('implement module', 'implement classes and logic', tpcritical, encodedate(2024, 4, 20));
     task3 := manager.addtask('write documentation', 'document task manager usage', tpmedium, encodedate(2024, 4, 25));
@@ -940,6 +1352,11 @@ begin
     manager.updatedescription(task1.id, 'refine the architecture and document decisions');
     manager.updatepriority(task1.id, tpcritical);
 
+    historystrings := manager.getstatushistorystrings(task2.id);
+    printstrings('status history for task 2', historystrings);
+    historystrings := manager.getstatushistorystrings(task3.id);
+    printstrings('status history for task 3', historystrings);
+
     manager.removetask(task1.id + 10);
 
     tasks := manager.getalltasks;
@@ -963,6 +1380,14 @@ begin
     tagmatches := manager.gettasksbytag('critical');
     printtasks('tasks tagged "critical"', tagmatches);
 
+    dependencyfree := manager.gettaskswithoutdependencies;
+    printtasks('tasks without dependencies', dependencyfree);
+
+    rescheduled := manager.rescheduleoverduetasks(encodedate(2024, 4, 22), 2);
+    printqwordarray('rescheduled task ids', rescheduled);
+    historystrings := manager.getstatushistorystrings(task2.id);
+    printstrings('status history for task 2 after reschedule', historystrings);
+
     summary := manager.getsummaries(encodedate(2024, 4, 22));
     writeln('summary total=', summary.total);
     writeln('summary pending=', summary.pending);
@@ -981,6 +1406,16 @@ begin
     writeln('progress active count=', progress.activecount);
     writeln('progress overdue count=', progress.overduecount);
 
+    workload := manager.getpriorityworkload;
+    printworkload('priority workload summary', workload);
+
+    topfocus := manager.gettopprioritizedtasks(2);
+    printtasks('top 2 prioritized tasks', topfocus);
+
+    forecast := manager.forecastworkload(encodedate(2024, 4, 16), 7);
+    writeln('forecast workload next 7 days=', formatfloat('0.00', forecast));
+
+    tasks := manager.getalltasks;
     len := length(tasks);
     if len > 0 then
       begin
